@@ -54,7 +54,7 @@ Every figure is measured from inside a sandbox or on the platform. None includes
 | Throughput, eight streams | 1.75 Gbit/s |
 | Throughput, reverse direction | 1.35 Gbit/s |
 | Wake a sleeping service through the relay | 2.97–4.05s |
-| Recover from a cold boot, first request after a stop | 1.8s |
+| Cold boot to serving, first request after a stop | 1.53s and 1.54s |
 | Create a sandbox | 0.9–3.2s |
 | Pause, near-idle service | 0.7–1.8s |
 | Pause, database with warm buffers | 20s and up |
@@ -204,7 +204,11 @@ A stack's time to sleep is therefore the **sum** of the timeouts along the chain
 
 Preemption, host failure, and a pause that does not complete all leave the same thing behind: a sandbox whose disk is intact and whose memory is gone. Its processes are not running, so a request that cold-boots it would otherwise find nothing listening and be reset.
 
-The agent is therefore registered as a **supervised Archil service**, which restarts on exit. Archil's own init starts it on boot, and it re-runs the whole setup — device links, the overlay, volume mounts, relays, then the application. Measured: a stopped sandbox served a request **1.8s** after it arrived, with `/proc/uptime` at 17s confirming a real reboot rather than a resume, and the service reporting `restart_count: 0` because it started cleanly.
+The agent is therefore registered as a **supervised Archil service**, which restarts on exit. Archil's own init starts it on boot, and it re-runs the whole setup — device links, the overlay, volume mounts, relays, then the application.
+
+Measured over two trials: a stopped sandbox served its first HTTP request **1.53s and 1.54s** after it arrived, with `/proc/uptime` reading 1.5s at that moment, so the whole boot and application start happened inside the request. A stop itself takes 0.7s.
+
+Without supervision the same request hung for **45s and was then reset**: the sandbox booted promptly but nothing ever listened, and that 45s was the ingress giving up rather than the boot. That is the difference supervision makes, and why a failed registration is now reported rather than logged quietly.
 
 Registering that service does not interfere with sleeping. A paused sandbox stays paused.
 
