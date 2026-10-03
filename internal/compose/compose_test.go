@@ -447,3 +447,33 @@ services:
 		}
 	}
 }
+
+// expose: declares a port reachable inside the project without publishing it,
+// which an image that does not list the port in its own config otherwise cannot
+// have without publishing it to the internet.
+func TestExposeIsReachableButNotPublished(t *testing.T) {
+	p := load(t, `
+services:
+  bench:
+    image: alpine
+    command: ["sleep", "1"]
+    expose:
+      - "5201"
+      - "9100/tcp"
+`)
+	s := p.Service("bench")
+	if len(s.Expose) != 2 || s.Expose[0] != 5201 || s.Expose[1] != 9100 {
+		t.Fatalf("expose: %v", s.Expose)
+	}
+	if len(s.Ports) != 0 {
+		t.Errorf("expose must not publish anything, got %+v", s.Ports)
+	}
+	// It is still a reachable port, so activity can be observed and the service
+	// does not default to keep-awake.
+	if s.KeepAwake {
+		t.Error("a service with an exposed port should not default to keep-awake")
+	}
+	if msg := loadErr(t, "services:\n  a:\n    image: x\n    expose: [\"53/udp\"]\n"); !strings.Contains(msg, "TCP") {
+		t.Errorf("UDP should be rejected: %s", msg)
+	}
+}

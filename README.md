@@ -40,26 +40,31 @@ The same Compose file runs locally and deployed. Compute and storage come from [
 
 ## Measured
 
-On one `s-1vcpu-512mb` hub and a two-service project — `nicolaka/netshoot` publishing HTTP, `postgres:17-alpine` private with a volume:
+A hub on one `c7gn.large` in `us-east-1a`, the same region as the sandboxes, provisioned by [`infra/hub-aws`](infra/hub-aws). Three services: two `nicolaka/netshoot` and one `postgres:17-alpine` with a volume.
 
-Every figure below is measured inside the region, either from one sandbox to another or on the platform itself. Nothing here includes the trip from an operator's laptop, which would report the distance to `us-east-1` rather than anything about the system.
+Every figure is measured from inside a sandbox or on the platform. None includes the trip from an operator's laptop, which would report the distance to the region rather than anything about the system.
 
 | | |
 |---|--:|
-| **Reach `postgres:5432` by name, awake** | **0.04s** |
-| Overlay round trip through the hub | 13.5ms |
-| **Wake a sleeping database through the relay** | **2.97–4.05s** |
+| **Service to service, connect and Postgres handshake by name** | **5.19ms median, 6.72ms p95** |
+| Round trip to a peer, through the hub | 1.264ms avg, 1.485ms max |
+| Round trip to the hub, one leg | 0.708ms avg |
+| **Throughput, one stream** | **1.36 Gbit/s** |
+| Throughput, eight streams | 1.75 Gbit/s |
+| Throughput, reverse direction | 1.35 Gbit/s |
+| Wake a sleeping service through the relay | 2.97–4.05s |
 | Create a sandbox | 0.9–3.2s |
 | Pause, near-idle service | 0.7–1.8s |
 | Pause, database with warm buffers | 20s and up |
-| Deploy from `up` to both slots ready | ~30s |
+| Deploy from `up` to three slots ready | ~40s |
 
-`go test -tags integration ./internal/e2e/` reruns all of it in 166s, including teardown.
+`go test -tags integration ./internal/e2e/` reruns the behavior in 166s, including teardown.
 
-- **Reaching a service by name costs 0.04s** once awake, measured from inside the calling sandbox. The Postgres SSL negotiation is part of the test, so a real server answered rather than a port merely being open.
+- **Putting the hub in the sandboxes' region is worth about 10×.** The same test against a hub in another provider's nearby city measured 13.5ms to a peer and 40ms for a Postgres handshake, against 1.26ms and 5.19ms here. Every byte between services crosses the hub twice, so its placement sets the floor for everything else.
+- **A service-to-service call costs about 5ms** because it spends three or four round trips there: the relay's own dial, the TCP handshake, and the protocol's first exchange. A local loopback connect on the same host is 0.05ms, so the overlay is the whole of the difference.
+- **Throughput is bounded by the hub's crypto, not its network card.** This instance advertises up to 30 Gbit/s and WireGuard delivered 1.36 Gbit/s on one stream and 1.75 Gbit/s across eight. Scale the hub for cores, and expect a ceiling well under the card.
 - **Waking through the relay is the slow path** at 3 to 4s, timed inside the caller: a resume, a WireGuard re-handshake on both sides, then the application's own accept.
 - **Pausing costs what the service holds in memory.** A pause that does not finish falls back to `stopped` and loses memory state, so treat sleeping as an optimisation rather than a guarantee.
-- **Deploy time is dominated by control-plane round trips** from wherever you run the CLI, so it moves with your distance to the region rather than with the size of the project.
 
 ## Quick start
 
@@ -223,7 +228,7 @@ In the sandbox, the agent restricts `wg0` to the project's range and declared po
 
 ## The Compose subset
 
-Supported: `image`, `build`, `command`, `environment`, `env_file`, `ports`, `volumes` (named), `healthcheck`, `depends_on`, `profiles`, `deploy.replicas`, `deploy.resources.reservations`. Everything else is rejected with a message naming what to do instead, never ignored.
+Supported: `image`, `build`, `command`, `environment`, `env_file`, `ports`, `expose`, `volumes` (named), `healthcheck`, `depends_on`, `profiles`, `deploy.replicas`, `deploy.resources.reservations`. Everything else is rejected with a message naming what to do instead, never ignored.
 
 A service needs only `image:` or `build:`. Most defaults come from the image itself:
 
@@ -232,7 +237,7 @@ A service needs only `image:` or `build:`. Most defaults come from the image its
 | `command` | The image's entrypoint and cmd |
 | Environment | The image's env, overlaid by Compose |
 | Working directory, user | The image's config |
-| Reachable ports | The image's exposed ports, plus any `ports:` |
+| Reachable ports | The image's exposed ports, plus any `ports:` or `expose:` |
 
 Reading the image config is what makes `command` optional. A sandbox never runs the image's entrypoint — PID 1 is Archil's init and nothing else starts — so without it every service would need an explicit command.
 
@@ -293,6 +298,16 @@ services:
 
 You provide the host and `--bootstrap` prepares it. A stock Ubuntu image with nothing installed is enough, so cloud-init is an optimisation rather than a prerequisite.
 
+[`infra/hub-aws`](infra/hub-aws) builds one in your sandboxes' region, which is where it belongs:
+
+```console
+cd infra/hub-aws
+terraform apply -var "public_key=$(cat ~/.ssh/id_ed25519.pub)" -var "ssh_cidr=$(curl -s -4 checkip.amazonaws.com)/32"
+export SIMPLECLOUD_HUB=$(terraform output -raw hub)
+```
+
+It creates its own VPC, opens SSH only to the address you pass, and opens the UDP range to everywhere, which is unavoidable: sandboxes NAT out through addresses that differ per sandbox and change on resume.
+
 ```console
 simplecloud hub add root@203.0.113.10 --identity ~/.ssh/id_ed25519 --bootstrap
 simplecloud hub status
@@ -302,7 +317,7 @@ simplecloud hub status
 
 | | |
 |---|---|
-| Size | One core, 512 MiB. Choose for **bandwidth**, not CPU — every byte between services passes through it |
+| Size | Choose for **cores and clock**, and put it in your sandboxes' region. WireGuard is CPU-bound on crypto, so a 2-vCPU instance advertising 30 Gbit/s delivered 1.36 Gbit/s on one stream. Region placement is worth about 10× on latency |
 | Image | Any current Ubuntu, since `--bootstrap` uses `apt` |
 | Network | Public IPv4, inbound UDP `51820–51899` |
 | Access | SSH as root, or a passwordless-sudo user |
@@ -373,6 +388,7 @@ Each of these presents as something other than its cause. `doctor` checks the on
 | A sandbox comes up with egress still denied | `create_sandbox(network=…)` is accepted and silently ignored, so only a later update works |
 | A slot never becomes ready | Inbound UDP to the hub is blocked, so the tunnel never handshakes. `hub status` reports it per peer |
 | A service is unreachable while the overlay looks healthy | The application is not listening — check `logs` for its exit code |
+| `ping <service>` succeeds but nothing connects | A service name resolves to a local relay alias and the relay carries TCP only, so ICMP never leaves the sandbox. Ping the overlay address from `simplecloud ps` to test the tunnel |
 | A volume looks mounted and holds no data | The mount failed and writes went to the sandbox root. The agent treats this as fatal |
 | Writes acknowledged then missing | Written after a delegation was revoked and before the new owner mounted |
 | An image runs but behaves wrongly | It is not `linux/amd64` |

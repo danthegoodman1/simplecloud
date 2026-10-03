@@ -195,6 +195,9 @@ func Resolve(ctx context.Context, f *Fetcher, projectDir string, s *compose.Serv
 	for _, p := range cfg.Ports {
 		ports[p] = true
 	}
+	for _, p := range s.Expose {
+		ports[p] = true
+	}
 	for _, p := range s.Ports {
 		ports[p.Container] = true
 		if p.Skipped {

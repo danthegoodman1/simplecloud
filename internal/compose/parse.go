@@ -78,8 +78,8 @@ var topLevelKeys = map[string]bool{
 
 var serviceKeys = map[string]bool{
 	"image": true, "build": true, "command": true, "environment": true,
-	"env_file": true, "ports": true, "volumes": true, "healthcheck": true,
-	"depends_on": true, "profiles": true, "deploy": true,
+	"env_file": true, "ports": true, "expose": true, "volumes": true,
+	"healthcheck": true, "depends_on": true, "profiles": true, "deploy": true,
 }
 
 // unsupported maps a rejected service key to the reason and the remedy.

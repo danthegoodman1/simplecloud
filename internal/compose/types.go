@@ -30,6 +30,9 @@ type Service struct {
 	// Ports the author asked to publish. Datastore ports are recorded here with
 	// Skipped set rather than dropped, so output can explain the decision.
 	Ports []Port
+	// Expose declares ports reachable inside the project without publishing them,
+	// for an image whose own config does not list them.
+	Expose []int
 
 	Mounts      []Mount
 	Healthcheck *Healthcheck

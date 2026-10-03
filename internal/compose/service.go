@@ -16,6 +16,7 @@ type rawService struct {
 	Environment yaml.Node       `yaml:"environment"`
 	EnvFile     yaml.Node       `yaml:"env_file"`
 	Ports       []yaml.Node     `yaml:"ports"`
+	Expose      []yaml.Node     `yaml:"expose"`
 	Volumes     []yaml.Node     `yaml:"volumes"`
 	Healthcheck *rawHealthcheck `yaml:"healthcheck"`
 	DependsOn   yaml.Node       `yaml:"depends_on"`
@@ -125,6 +126,13 @@ func parseService(name string, node *yaml.Node, p *Project) (*Service, Errors) {
 			s.Ports = append(s.Ports, *port)
 		}
 	}
+	for _, en := range r.Expose {
+		port, perr := parseExposed(name, &en)
+		errs = append(errs, perr...)
+		if port > 0 {
+			s.Expose = append(s.Expose, port)
+		}
+	}
 	for _, vn := range r.Volumes {
 		m, verr := parseMount(name, &vn)
 		errs = append(errs, verr...)
@@ -174,7 +182,7 @@ func parseService(name string, node *yaml.Node, p *Project) (*Service, Errors) {
 
 	// A service with no reachable port cannot have its activity observed, so
 	// inferring that it is idle would be wrong. Default it to keep-awake.
-	if !s.keepAwakeSet && len(s.Ports) == 0 {
+	if !s.keepAwakeSet && len(s.Ports) == 0 && len(s.Expose) == 0 {
 		s.KeepAwake = true
 	}
 	if s.VCPU < 1 || s.VCPU > 32 {
@@ -470,4 +478,24 @@ func parseMemory(v string) (int, error) {
 		return 0, fmt.Errorf("memory %q is not a size", v)
 	}
 	return int(n) * mult, nil
+}
+
+// parseExposed reads one expose: entry, which names a port reachable inside the
+// project rather than one to publish.
+func parseExposed(svc string, node *yaml.Node) (int, Errors) {
+	spec := node.Value
+	if base, proto, found := strings.Cut(spec, "/"); found {
+		if strings.ToLower(proto) != "tcp" {
+			return 0, Errors{&Error{Service: svc, Key: "expose",
+				Problem: fmt.Sprintf("protocol %q is not supported", proto),
+				Fix:     "Only TCP is carried between services."}}
+		}
+		spec = base
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(spec))
+	if err != nil || n < 1 || n > 65535 {
+		return 0, Errors{&Error{Service: svc, Key: "expose",
+			Problem: fmt.Sprintf("%q is not a valid port", node.Value)}}
+	}
+	return n, nil
 }

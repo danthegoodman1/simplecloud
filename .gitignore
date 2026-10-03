@@ -12,3 +12,11 @@
 # Editor and OS noise
 .DS_Store
 *.swp
+
+# Terraform state and local variable files
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfplan
+tf.plan
