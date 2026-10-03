@@ -42,8 +42,8 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
-func (c *cli) start(args ...string) *bg {
-	c.t.Helper()
+func (c *cli) start(t *testing.T, args ...string) *bg {
+	t.Helper()
 	cmd := exec.Command(c.bin, args...)
 	cmd.Dir = c.dir
 	cmd.Env = c.envs
@@ -51,11 +51,11 @@ func (c *cli) start(args ...string) *bg {
 	cmd.Stdout = buf
 	cmd.Stderr = buf
 	if err := cmd.Start(); err != nil {
-		c.t.Fatalf("starting simplecloud %s: %v", strings.Join(args, " "), err)
+		t.Fatalf("starting simplecloud %s: %v", strings.Join(args, " "), err)
 	}
-	b := &bg{t: c.t, cmd: cmd, out: buf, args: args, done: make(chan struct{})}
+	b := &bg{t: t, cmd: cmd, out: buf, args: args, done: make(chan struct{})}
 	go func() { cmd.Wait(); close(b.done) }()
-	c.t.Cleanup(func() { b.stop() })
+	t.Cleanup(func() { b.stop() })
 	return b
 }
 
@@ -160,7 +160,7 @@ func assertPostgresAnswers(t *testing.T, addr string) {
 // published port, so this is the only way a local tool reaches it.
 func TestForwardReachesAPrivateDatabase(t *testing.T) {
 	c := setup(t, fixture)
-	t.Log(c.run(20*time.Minute, "up", "-y"))
+	t.Log(c.run(20*time.Minute, "up"))
 
 	// A private port stays private. If it were published, the forward would be
 	// proving nothing.
@@ -171,7 +171,7 @@ func TestForwardReachesAPrivateDatabase(t *testing.T) {
 
 	t.Run("explicit local port", func(t *testing.T) {
 		local := freePort(t)
-		f := c.start("forward", fmt.Sprintf("%d:postgres:5432", local))
+		f := c.start(t, "forward", fmt.Sprintf("%d:postgres:5432", local))
 		f.waitFor("Press Ctrl-C", 3*time.Minute)
 		assertPostgresAnswers(t, fmt.Sprintf("127.0.0.1:%d", local))
 		t.Logf("forward output:\n%s", indent(f.stop()))
@@ -180,7 +180,7 @@ func TestForwardReachesAPrivateDatabase(t *testing.T) {
 	t.Run("port discovered from the agent", func(t *testing.T) {
 		// Naming no port asks the agent which it declares, so this also proves the
 		// status endpoint reports them.
-		f := c.start("forward", "postgres")
+		f := c.start(t, "forward", "postgres")
 		f.waitFor("Press Ctrl-C", 3*time.Minute)
 		out := f.out.String()
 		if !strings.Contains(out, "5432") {
@@ -192,7 +192,7 @@ func TestForwardReachesAPrivateDatabase(t *testing.T) {
 
 	t.Run("several connections over one forward", func(t *testing.T) {
 		local := freePort(t)
-		f := c.start("forward", fmt.Sprintf("%d:postgres:5432", local))
+		f := c.start(t, "forward", fmt.Sprintf("%d:postgres:5432", local))
 		f.waitFor("Press Ctrl-C", 3*time.Minute)
 		addr := fmt.Sprintf("127.0.0.1:%d", local)
 		for i := 0; i < 3; i++ {
@@ -205,21 +205,40 @@ func TestForwardReachesAPrivateDatabase(t *testing.T) {
 		t.Logf("forward output:\n%s", indent(f.stop()))
 	})
 
-	t.Run("an undeclared port is refused", func(t *testing.T) {
+	t.Run("an undeclared port is refused before binding", func(t *testing.T) {
 		local := freePort(t)
-		f := c.start("forward", fmt.Sprintf("%d:postgres:22", local))
+		f := c.start(t, "forward", fmt.Sprintf("%d:postgres:22", local))
 		out := f.waitExit(3 * time.Minute)
 		if !strings.Contains(out, "does not declare port 22") {
 			t.Fatalf("forwarding an undeclared port should be refused with a reason:\n%s", indent(out))
 		}
+		// Refusing after binding would leave a forward that looks healthy and fails
+		// only when something connects.
+		if strings.Contains(out, "Press Ctrl-C") {
+			t.Fatalf("the local port was bound before the target was checked:\n%s", indent(out))
+		}
+		if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", local)); err != nil {
+			t.Fatalf("the local port was left bound after the refusal: %v", err)
+		} else {
+			ln.Close()
+		}
 		t.Logf("refused as expected:\n%s", indent(out))
+	})
+
+	t.Run("any forwards an undeclared port deliberately", func(t *testing.T) {
+		// The refusal is a guard rail rather than a wall, so --any gets past it.
+		local := freePort(t)
+		f := c.start(t, "forward", "--any", fmt.Sprintf("%d:postgres:5432", local))
+		f.waitFor("Press Ctrl-C", 3*time.Minute)
+		assertPostgresAnswers(t, fmt.Sprintf("127.0.0.1:%d", local))
+		t.Logf("forward output:\n%s", indent(f.stop()))
 	})
 
 	t.Run("a jump host reaches it through another service", func(t *testing.T) {
 		// web resolves postgres through its own relay, so forwarding through web
 		// exercises the overlay path as well as the ingress one.
 		local := freePort(t)
-		f := c.start("forward", "--via", "web", "--any", fmt.Sprintf("%d:postgres:5432", local))
+		f := c.start(t, "forward", "--via", "web", "--any", fmt.Sprintf("%d:postgres:5432", local))
 		f.waitFor("Press Ctrl-C", 3*time.Minute)
 		assertPostgresAnswers(t, fmt.Sprintf("127.0.0.1:%d", local))
 		t.Logf("forward output:\n%s", indent(f.stop()))
@@ -230,7 +249,7 @@ func TestForwardReachesAPrivateDatabase(t *testing.T) {
 // on a stack that sleeps: connecting is itself the wake.
 func TestForwardWakesASleepingDatabase(t *testing.T) {
 	c := setup(t, fixture)
-	t.Log(c.run(20*time.Minute, "up", "-y"))
+	t.Log(c.run(20*time.Minute, "up"))
 
 	t.Log(c.run(5*time.Minute, "sleep"))
 	ps := c.run(2*time.Minute, "ps")
@@ -241,7 +260,7 @@ func TestForwardWakesASleepingDatabase(t *testing.T) {
 
 	local := freePort(t)
 	start := time.Now()
-	f := c.start("forward", fmt.Sprintf("%d:postgres:5432", local))
+	f := c.start(t, "forward", fmt.Sprintf("%d:postgres:5432", local))
 	// Resolving the port wakes the slot, so this line already means it is awake.
 	f.waitFor("Press Ctrl-C", 5*time.Minute)
 	t.Logf("a sleeping database was reachable %s after asking", time.Since(start).Round(100*time.Millisecond))
@@ -256,38 +275,89 @@ func TestForwardWakesASleepingDatabase(t *testing.T) {
 	t.Logf("forward output:\n%s", indent(f.stop()))
 }
 
+// echoFixture exists because the property under test needs a server that holds an
+// idle connection. Postgres closes an unauthenticated one after its 60s
+// authentication_timeout, which looks exactly like a tunnel failing.
+const echoFixture = `
+services:
+  echo:
+    image: nicolaka/netshoot:latest
+    command: ["socat", "TCP-LISTEN:9000,fork,reuseaddr", "EXEC:/bin/cat"]
+    expose:
+      - "9000"
+    x-simplecloud-idle-timeout: 45s
+  web:
+    image: nicolaka/netshoot:latest
+    command: ["python3", "-m", "http.server", "8080", "--bind", "0.0.0.0"]
+    ports:
+      - "8080:8080"
+    x-simplecloud-idle-timeout: 45s
+`
+
 // TestForwardHoldsASlotAwake checks that the reaper leaves a slot alone while an
-// operator is using it, which it would not do if a tunnel were invisible to the
-// activity count.
+// operator is using it, which it would not do if an open tunnel were invisible to
+// the activity count.
 func TestForwardHoldsASlotAwake(t *testing.T) {
-	c := setup(t, fixture)
-	t.Log(c.run(20*time.Minute, "up", "-y"))
+	c := setup(t, echoFixture)
+	t.Log(c.run(20*time.Minute, "up"))
 
 	local := freePort(t)
-	f := c.start("forward", fmt.Sprintf("%d:postgres:5432", local))
+	f := c.start(t, "forward", fmt.Sprintf("%d:echo:9000", local))
 	f.waitFor("Press Ctrl-C", 3*time.Minute)
 
-	// Hold a connection open rather than reconnecting, so only the open tunnel can
-	// account for the slot staying awake.
+	// Open one connection and hold it idle. Only the open tunnel can account for
+	// the slot staying awake, because nothing is sent after this exchange.
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", local), 30*time.Second)
 	if err != nil {
 		t.Fatalf("opening a held connection: %v", err)
 	}
 	defer conn.Close()
+	if _, err := conn.Write([]byte("hello")); err != nil {
+		t.Fatalf("writing to the held connection: %v", err)
+	}
+	echoed := make([]byte, 5)
+	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if _, err := io.ReadFull(conn, echoed); err != nil {
+		t.Fatalf("the held connection never reached the service: %v", err)
+	}
+	conn.SetReadDeadline(time.Time{})
+	t.Logf("held connection established, echoed %q", echoed)
 
 	// The fixture's idle timeout is 45s, so wait past it and ask the reaper to act.
 	time.Sleep(70 * time.Second)
 	out := c.run(5*time.Minute, "reap", "--dry-run")
-	if strings.Contains(out, "postgres") && strings.Contains(out, "sleep") {
+
+	// web is the control. It has no forward, so it must be eligible, which is what
+	// proves the idle window really elapsed rather than the test being early.
+	var webLine, echoLine string
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.Contains(line, "web-1"):
+			webLine = line
+		case strings.Contains(line, "echo-1"):
+			echoLine = line
+		}
+	}
+	if !strings.Contains(webLine, "would sleep") {
+		t.Fatalf("web should be eligible to sleep after 70s, so the window elapsed:\n%s", indent(out))
+	}
+	if strings.Contains(echoLine, "would sleep") {
 		t.Fatalf("the reaper wanted to sleep a slot with a forward open:\n%s", indent(out))
 	}
-	t.Logf("reaper left it alone:\n%s", indent(out))
+	t.Logf("web was eligible and echo was not:\n%s", indent(out))
 
-	// The held connection should show up as a forwarded connection on the slot.
-	status := c.run(2*time.Minute, "show", "postgres")
+	// The held connection should still be counted, and still work.
+	status := c.run(2*time.Minute, "show", "echo")
 	if !strings.Contains(status, "1 forwarded") {
 		t.Fatalf("show should report the open forward:\n%s", indent(status))
 	}
-	t.Logf("status:\n%s", indent(status))
+	if _, err := conn.Write([]byte("again")); err != nil {
+		t.Fatalf("the held connection died during the idle window: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if _, err := io.ReadFull(conn, echoed); err != nil {
+		t.Fatalf("the held connection stopped carrying traffic after 70s idle: %v", err)
+	}
+	t.Logf("the forward still carried traffic after the idle window, echoing %q", echoed)
 	t.Logf("forward output:\n%s", indent(f.stop()))
 }

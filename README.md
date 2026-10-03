@@ -61,7 +61,7 @@ Every figure is measured from inside a sandbox or on the platform. None includes
 | Pause, database with warm buffers | 20s and up |
 | Deploy from `up` to three slots ready | ~40s |
 
-`go test -tags integration ./internal/e2e/` reruns the behavior in 166s, including teardown.
+`go test -tags integration ./internal/e2e/` reruns the behavior in 366s, including teardown.
 
 - **Putting the hub in the sandboxes' region is worth about 10×.** The same test against a hub in another provider's nearby city measured 13.5ms to a peer and 40ms for a Postgres handshake, against 1.26ms and 5.19ms here. Every byte between services crosses the hub twice, so its placement sets the floor for everything else.
 - **A service-to-service call costs about 5ms** because it spends three or four round trips there: the relay's own dial, the TCP handshake, and the protocol's first exchange. A local loopback connect on the same host is 0.05ms, so the overlay is the whole of the difference.
@@ -195,7 +195,7 @@ The connection travels the agent's control path rather than the private network.
 
 Three properties follow from going through the agent:
 
-**Connecting wakes the service.** The tunnel endpoint is served by the same agent as the doorbell, so asking for a forward is itself the knock. A sleeping database is reachable without waking it first.
+**Connecting wakes the service.** The tunnel endpoint is served by the same agent as the doorbell, so asking for a forward is itself the knock. A sleeping database is reachable without waking it first, and the wake skips the overlay re-handshake that makes the relay path slow, because nothing crosses the private network. Its latency is not in [Measured](#measured) because a forward is timed from the operator's machine and would report the distance to the region.
 
 **An open forward holds the slot awake.** The agent counts forwarded connections as activity, so the reaper leaves a slot alone while you are using it rather than pausing underneath a live session. Telling it to `sleep` closes the forward rather than freezing it, so your client sees a close instead of a hang.
 

@@ -67,6 +67,15 @@ func parseForward(arg string) (forwardSpec, error) {
 	return bad()
 }
 
+func containsInt(haystack []int, want int) bool {
+	for _, n := range haystack {
+		if n == want {
+			return true
+		}
+	}
+	return false
+}
+
 // forward is one running listener.
 type forward struct {
 	Local  int
@@ -177,25 +186,39 @@ func (e *env) resolveForwards(d *deploy.Deployer, proj *state.Project, specs []f
 			label = slot.Name
 		}
 
-		want := []int{spec.Remote}
-		if spec.Remote == 0 {
-			if viaSlot != nil {
-				return nil, fmt.Errorf("%s needs a port, because --via cannot ask another service what it declares", spec.Target)
-			}
-			known, ok := ports[slot.Name]
+		if spec.Remote == 0 && viaSlot != nil {
+			return nil, fmt.Errorf("%s needs a port, because --via cannot ask another service what it declares", spec.Target)
+		}
+
+		// Ask the slot which ports it declares, both to expand a spec that names
+		// none and to refuse an impossible one before binding a local port. The
+		// alternative is a forward that looks healthy until something connects, and
+		// then reports the refusal in the wrong terminal.
+		var known []int
+		if viaSlot == nil && !allowAny {
+			cached, ok := ports[slot.Name]
 			if !ok {
 				st, err := d.AgentStatus(slot)
 				if err != nil {
 					return nil, fmt.Errorf("asking %s which ports it declares: %w", slot.Name, err)
 				}
-				known = st.ReachablePorts
-				sort.Ints(known)
-				ports[slot.Name] = known
+				cached = st.ReachablePorts
+				sort.Ints(cached)
+				ports[slot.Name] = cached
 			}
+			known = cached
+		}
+
+		want := []int{spec.Remote}
+		switch {
+		case spec.Remote == 0:
 			if len(known) == 0 {
 				return nil, fmt.Errorf("%s declares no ports.\n  Name one explicitly, as %s:PORT", slot.Name, spec.Target)
 			}
 			want = known
+		case known != nil && !containsInt(known, spec.Remote):
+			return nil, fmt.Errorf("%s does not declare port %d, it declares %s.\n  Pass --any to forward it anyway",
+				slot.Name, spec.Remote, joinInts(known))
 		}
 
 		for _, p := range want {

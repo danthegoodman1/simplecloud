@@ -20,3 +20,4 @@
 *.tfvars
 *.tfplan
 tf.plan
+tfplan

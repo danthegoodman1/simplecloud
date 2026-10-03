@@ -58,6 +58,10 @@ func setup(t *testing.T, composeBody string) *cli {
 		}
 		t.Logf("torn down:\n%s", indent(out))
 	})
+	// A stock host has neither wireguard-tools nor nftables, and every test gets its
+	// own state directory, so each one registers and bootstraps the hub for itself.
+	// Bootstrap is idempotent, so repeating it costs a preflight.
+	c.run(5*time.Minute, "hub", "add", os.Getenv("SC_TEST_HUB"), "--bootstrap", "--accept-new-host-key")
 	return c
 }
 
