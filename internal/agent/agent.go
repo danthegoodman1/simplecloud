@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"sync"
 	"time"
@@ -20,6 +21,11 @@ type Agent struct {
 	lastActive time.Time
 	startedAt  time.Time
 	drainedAt  time.Time
+
+	// Forwarded connections get their own lock: a tunnel is held open for as long
+	// as an operator keeps it, so it must never block an activity snapshot.
+	tunMu sync.Mutex
+	tuns  map[net.Conn]struct{}
 }
 
 func New(cfg *Config) (*Agent, error) {
@@ -120,7 +126,8 @@ func (a *Agent) flushLoop(ctx context.Context) {
 	}
 }
 
-// Drain closes every outbound relay connection so peers see a clean FIN.
+// Drain closes every outbound relay connection and every forwarded connection so
+// peers and operators see a clean FIN.
 //
 // Pausing snapshots memory and stops the VM; it does not close sockets. Without
 // this, a paused service's peers keep seeing ESTABLISHED and would not notice for
@@ -130,9 +137,10 @@ func (a *Agent) Drain() int {
 	for _, r := range a.relays {
 		closed += r.CloseConnections()
 	}
+	tunnels := a.CloseTunnels()
 	a.mu.Lock()
 	a.drainedAt = time.Now()
 	a.mu.Unlock()
-	a.logf("drained %d outbound relay connection(s)", closed)
-	return closed
+	a.logf("drained %d outbound relay connection(s) and %d forwarded connection(s)", closed, tunnels)
+	return closed + tunnels
 }

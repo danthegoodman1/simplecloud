@@ -61,16 +61,24 @@ func (a *Agent) NewControlServer() *ControlServer {
 		})
 	}))
 
+	// A forward needs a byte stream rather than a JSON reply, so this is the one
+	// control endpoint that upgrades. It carries the same token as the rest.
+	s.mux.HandleFunc("/v1/tunnel", s.authed(s.tunnel))
+
 	s.mux.HandleFunc("/v1/status", s.authed(func(w http.ResponseWriter, r *http.Request) {
 		outbound := 0
 		for _, rel := range a.relays {
 			outbound += rel.Outbound()
 		}
+		ports := a.cfg.ReachablePorts
+		if ports == nil {
+			ports = []int{}
+		}
 		writeJSON(w, map[string]any{
 			"slot": a.cfg.Slot, "service": a.cfg.Service,
 			"overlay_ip": a.cfg.OverlayIP, "relays": len(a.relays),
 			"outbound_connections": outbound, "activity": a.Snapshot(),
-			"app": a.appExit(),
+			"reachable_ports": ports, "app": a.appExit(),
 		})
 	}))
 	return s

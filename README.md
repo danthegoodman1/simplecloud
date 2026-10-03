@@ -13,6 +13,7 @@ The same Compose file runs locally and deployed. Compute and storage come from [
   - [Addressing](#addressing)
   - [Service names and the relay](#service-names-and-the-relay)
   - [Waking](#waking)
+  - [Reaching a private port from your machine](#reaching-a-private-port-from-your-machine)
   - [Sleeping](#sleeping)
   - [Preemption and cold boot](#preemption-and-cold-boot)
   - [Volumes](#volumes)
@@ -179,6 +180,34 @@ sequenceDiagram
 An authenticated request resumes a paused sandbox and returns once its agent answers. An unauthenticated one returns 401 and **leaves it paused**, so learning a hostname buys nothing, not even the cost of a wake. Both the dial and the doorbell retry for three minutes, because the caller may itself have just woken and its first outbound request can fail.
 
 The same listener serves the control API the CLI uses for status, activity, logs, and drain, gated on a second token. A wake cannot read logs.
+
+### Reaching a private port from your machine
+
+A database has no published port, which is the point: nothing outside the project can reach it. `forward` carries one to your machine anyway, so local tools work against it.
+
+```
+simplecloud forward postgres              # every port it declares, same local number
+simplecloud forward postgres:5432         # one port
+simplecloud forward 15432:postgres:5432   # a different local port, as ssh -L spells it
+```
+
+The connection travels the agent's control path rather than the private network. Your machine opens an authenticated WebSocket to the slot's ingress, the agent dials the address inside the sandbox, and the two are spliced. Nothing has to be configured here, there is no WireGuard key to hold, and the hub is not on the path, so a forward works when the hub is unreachable.
+
+Three properties follow from going through the agent:
+
+**Connecting wakes the service.** The tunnel endpoint is served by the same agent as the doorbell, so asking for a forward is itself the knock. A sleeping database is reachable without waking it first.
+
+**An open forward holds the slot awake.** The agent counts forwarded connections as activity, so the reaper leaves a slot alone while you are using it rather than pausing underneath a live session. Telling it to `sleep` closes the forward rather than freezing it, so your client sees a close instead of a hang.
+
+**The target is scoped to what the service declares.** An undeclared port is refused, because the control token would otherwise reach any address the sandbox can, including other projects' services through their relay aliases. `--any` widens it deliberately, and `--via` makes another service the jump host:
+
+```
+simplecloud forward --via web --any 15432:postgres:5432
+```
+
+That form resolves `postgres` in web's view, so it travels web's relay and wakes postgres the same way web's own traffic would.
+
+A forward raises what the control token is worth. It already granted logs, drain, and status, and it now also grants a connection to the service's own ports.
 
 ### Sleeping
 
@@ -373,6 +402,7 @@ A project's identity is bound to the directory holding its Compose file, so two 
 | `ls` `ps` `show` | Projects, slots, and one slot in detail |
 | `endpoints` `url` | Public URLs and in-project addresses |
 | `logs` `exec` | Output and a shell |
+| `forward` | Carry a private port to a local one |
 | `volumes` | Disks, slots, delegation holders |
 | `build` `registry add` | Build and push without deploying |
 | `hub add` / `status` / `set-endpoint` | Register and inspect the hub |
@@ -423,6 +453,7 @@ Each of these presents as something other than its cause. `doctor` checks the on
 - **Volume handover is unimplemented.** A replacement recreates without revoking, so moving a volume between slots is unproven.
 - **amd64 only**, and the agent is a second process in every sandbox, counting against the slot's memory.
 - **No per-connection replica balancing, no rolling updates, no UDP between services.** A base service name resolves to slot 1.
+- **A forward carries TCP only**, one tunnel per connection, and each pays a TLS handshake to the ingress plus the distance to the region. That suits a client that pools connections and makes a forward a poor bulk transfer.
 - **A scheduled job has no reachable port**, so it defaults to keep-awake and bills continuously. A cron beside `reap` is cheaper: `simplecloud exec postgres -- pg_dump …`.
 
 ## Development

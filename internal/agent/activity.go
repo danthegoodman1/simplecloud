@@ -14,6 +14,7 @@ type Activity struct {
 	Slot        string    `json:"slot"`
 	Service     string    `json:"service"`
 	Connections int       `json:"inbound_connections"`
+	Tunnels     int       `json:"forwarded_connections"`
 	LastActive  time.Time `json:"last_active"`
 	IdleFor     float64   `json:"idle_seconds"`
 	KeepAwake   bool      `json:"keep_awake"`
@@ -25,14 +26,19 @@ type Activity struct {
 
 // Snapshot reports current activity.
 //
-// Activity is an established inbound connection on a declared port. Outbound
-// connections are deliberately excluded: counting them would let a service
-// holding an idle connection pool look busy forever and never sleep, and the
-// cascade that lets a database sleep after its API does would never start.
+// Activity is an established inbound connection on a declared port, or an open
+// forwarded connection. Outbound connections are deliberately excluded: counting
+// them would let a service holding an idle connection pool look busy forever and
+// never sleep, and the cascade that lets a database sleep after its API does
+// would never start.
 func (a *Agent) Snapshot() Activity {
 	conns := a.countInbound()
+	// A forward to a port this service never declared, or through this slot to
+	// another, does not appear in /proc/net/tcp as inbound, so open tunnels are
+	// counted directly rather than inferred.
+	tunnels := a.Tunnels()
 	a.mu.Lock()
-	if conns > 0 {
+	if conns > 0 || tunnels > 0 {
 		a.lastActive = time.Now()
 	}
 	last := a.lastActive
@@ -41,7 +47,7 @@ func (a *Agent) Snapshot() Activity {
 
 	idle := time.Since(last)
 	act := Activity{
-		Slot: a.cfg.Slot, Service: a.cfg.Service, Connections: conns,
+		Slot: a.cfg.Slot, Service: a.cfg.Service, Connections: conns, Tunnels: tunnels,
 		LastActive: last.UTC(), IdleFor: idle.Seconds(),
 		KeepAwake: a.cfg.KeepAwake, IdleTimeout: a.cfg.IdleTimeout().Seconds(),
 		UptimeSecs: time.Since(started).Seconds(),
@@ -50,7 +56,7 @@ func (a *Agent) Snapshot() Activity {
 		act.LogSegment = a.ring.Dropped()
 	}
 	act.ShouldSleep = !a.cfg.KeepAwake && a.cfg.IdleSeconds > 0 &&
-		conns == 0 && idle >= a.cfg.IdleTimeout()
+		conns == 0 && tunnels == 0 && idle >= a.cfg.IdleTimeout()
 	return act
 }
 

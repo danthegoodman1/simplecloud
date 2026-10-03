@@ -63,6 +63,7 @@ func Root() *cobra.Command {
 		showCmd(),
 		volumesCmd(),
 		execCmd(),
+		forwardCmd(),
 		downCmd(),
 		hubCmd(),
 		buildCmd(),
@@ -179,6 +180,18 @@ func (e *env) deployerQuiet() (*deploy.Deployer, func(), error) {
 		Ctx: e.ctx, Store: e.store, Client: e.client, Hub: client, HubRec: rec,
 		Fetcher: plan.NewFetcher(), Out: io.Discard,
 	}, func() { client.Close() }, nil
+}
+
+// deployerAgentOnly builds a deployer for commands that only talk to agents.
+//
+// The control API and the tunnel it carries travel the Archil ingress, so these
+// commands need no access to the hub, and a forward keeps working when the hub is
+// unreachable.
+func (e *env) deployerAgentOnly() *deploy.Deployer {
+	return &deploy.Deployer{
+		Ctx: e.ctx, Store: e.store, Client: e.client,
+		Fetcher: plan.NewFetcher(), Out: io.Discard,
+	}
 }
 
 func (e *env) buildPlan(cp *compose.Project, proj *state.Project) (*plan.Plan, error) {

@@ -2,15 +2,20 @@ package deploy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/danthegoodman1/simplecloud/internal/agent"
 	"github.com/danthegoodman1/simplecloud/internal/agentbin"
@@ -318,6 +323,7 @@ type AgentStatus struct {
 	Relays              int            `json:"relays"`
 	OutboundConnections int            `json:"outbound_connections"`
 	Activity            agent.Activity `json:"activity"`
+	ReachablePorts      []int          `json:"reachable_ports"`
 	App                 *agent.AppExit `json:"app"`
 }
 
@@ -416,4 +422,44 @@ func shortID(id string) string {
 		return id[:10]
 	}
 	return id
+}
+
+// AgentTunnel opens a byte stream to an address the slot can reach, carried over
+// the same authenticated ingress path as the rest of the control API.
+//
+// This is how a forward works: the operator's machine has no route into the
+// overlay, so the agent dials on its behalf. Opening the stream also rings the
+// doorbell, so forwarding to a sleeping service wakes it rather than timing out.
+func (d *Deployer) AgentTunnel(ctx context.Context, slot *state.Slot, addr string, allowAny bool) (net.Conn, error) {
+	if slot.DoorbellHost == "" {
+		return nil, fmt.Errorf("slot %s has no doorbell yet", slot.Name)
+	}
+	u := "wss://" + slot.DoorbellHost + "/v1/tunnel?addr=" + url.QueryEscape(addr)
+	if allowAny {
+		u += "&any=1"
+	}
+	header := http.Header{}
+	header.Set("X-Archil-Token", slot.DoorbellToken)
+	header.Set("X-SC-Token", controlTokenFor(slot))
+	conn, resp, err := websocket.Dial(ctx, u, &websocket.DialOptions{
+		HTTPHeader: header,
+		// No client timeout: a forward lives as long as the operator keeps it.
+		HTTPClient:      &http.Client{Timeout: 0},
+		CompressionMode: websocket.CompressionDisabled,
+	})
+	if err != nil {
+		// The agent reports a refused target as an HTTP status with a reason, which
+		// is more use than the handshake error that wraps it.
+		if resp != nil && resp.Body != nil {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			resp.Body.Close()
+			if msg := strings.TrimSpace(string(body)); msg != "" {
+				return nil, fmt.Errorf("%s refused a tunnel to %s: %s", slot.Name, addr, msg)
+			}
+		}
+		return nil, fmt.Errorf("opening a tunnel to %s on %s: %w", addr, slot.Name, err)
+	}
+	// NetConn lifts the per-message read limit, which matters here: this carries
+	// application traffic rather than control messages.
+	return websocket.NetConn(ctx, conn, websocket.MessageBinary), nil
 }

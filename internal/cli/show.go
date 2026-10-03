@@ -122,8 +122,8 @@ func showCmd() *cobra.Command {
 				if d, closeHub, err := e.deployerQuiet(); err == nil {
 					defer closeHub()
 					if st, err := d.AgentStatus(slot); err == nil {
-						fmt.Fprintf(out, "\nAgent      %d relay(s), %d outbound connection(s), %d inbound\n",
-							st.Relays, st.OutboundConnections, st.Activity.Connections)
+						fmt.Fprintf(out, "\nAgent      %d relay(s), %d outbound connection(s), %d inbound, %d forwarded\n",
+							st.Relays, st.OutboundConnections, st.Activity.Connections, st.Activity.Tunnels)
 						if st.App != nil && st.App.Exited {
 							fmt.Fprintf(out, "Application exited with code %d after %.1fs\n", st.App.Code, st.App.Duration)
 						}
