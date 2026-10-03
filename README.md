@@ -1,8 +1,8 @@
 # simplecloud
 
-Deploy a Docker Compose project so each service runs in its own microVM, services reach each other by name over a private network, and idle services sleep and wake on the next request.
+Deploy a Docker Compose project so each service runs in its own microVM, services reach each other by name over a private network, volumes sit on bottomless disks, and idle services sleep and wake on the next request.
 
-The same Compose file runs locally and deployed. Compute and storage come from [Archil](https://archil.com); the private network is WireGuard through a hub you provide.
+The same Compose file runs locally and deployed. Compute and storage come from [Archil](https://archil.com). The private network is WireGuard through a hub you provide.
 
 ## Contents
 
@@ -33,6 +33,7 @@ The same Compose file runs locally and deployed. Compute and storage come from [
 - **A sleeping database wakes when something connects to it.** Each service gets an authenticated doorbell, so a service with no public port is still reachable on demand. An unauthenticated request is refused and leaves it asleep. See [Waking](#waking).
 - **Sleeping cascades down the stack.** An agent closes its outbound connections before pausing, so the database behind a sleeping API sees a clean FIN, goes idle, and sleeps in turn. See [Sleeping](#sleeping).
 - **A slot keeps its identity for life.** Its WireGuard key and overlay address outlive any sandbox, so updating one service replaces its microVM without touching the hub's peer set or the other services. See [Addressing](#addressing).
+- **Volumes are bottomless and cost what they hold.** Each named volume is an Archil disk that grows on demand with no size to choose, billed on the bytes actually stored, and fast enough to run a database directly on it. A slot keeps its disk across sleep, wake, and replacement. See [Volumes](#volumes).
 - **Your image is never modified.** The agent is uploaded and run beside the application, and configures the overlay through netlink rather than tools the image might not ship. `postgres:17-alpine` has neither `wg` nor `ip` and works unchanged. See [How it works](#how-it-works).
 - **A local Compose file deploys without edits.** A mapped database port is skipped rather than published to the internet, and `profiles` decides what exists where. See [Local to deployed](#local-to-deployed).
 - **No central service.** State is local SQLite, the hub holds no credential, and `reap` from cron is the whole control loop.
@@ -133,7 +134,7 @@ flowchart LR
 
 ### Addressing
 
-Each project gets a `/24` from `10.88.0.0/16`. The hub is `.1`; slots run from `.10`. A **slot** owns its WireGuard keypair and overlay address for life, both held in SQLite, and sandboxes are disposable incarnations of it.
+Each project gets a `/24` from `10.88.0.0/16`. The hub takes `.1` and slots run from `.10`. A **slot** owns its WireGuard keypair and overlay address for life, both held in SQLite, and sandboxes are disposable incarnations of it.
 
 That is what makes a per-service update cheap. Replacing a sandbox reuses the slot's key, so the hub's peer set is byte-identical afterward and no other service notices.
 
@@ -178,7 +179,7 @@ The same listener serves the control API the CLI uses for status, activity, logs
 
 Archil's own idle timeout counts attached process connections rather than traffic, so it would pause a busy service. It is pinned to `0` and the agent accounts for activity instead.
 
-**Activity is an established inbound connection on a declared port.** A public service sees those from the internet, a private one over the overlay; one rule covers both. Outbound connections are deliberately not activity for the service that opens them, or an API holding an idle pool would look busy forever.
+**Activity is an established inbound connection on a declared port.** A public service sees those arrive from the internet and a private one over the overlay, so one rule covers both. Outbound connections are deliberately not activity for the service that opens them, or an API holding an idle pool would look busy forever.
 
 A service with no reachable port cannot be observed at all, so it defaults to keep-awake.
 
@@ -190,13 +191,17 @@ flowchart TB
   I --> S[Both asleep]
 ```
 
-The drain is the part that matters. Pausing snapshots memory and stops the VM; it does not close sockets. Without draining first, a peer would keep seeing `ESTABLISHED` until TCP keepalive expired — two hours by default — and a database behind a sleeping API would never go idle.
+The drain is the part that matters. Pausing snapshots memory and stops the VM without closing sockets. Without draining first, a peer would keep seeing `ESTABLISHED` until TCP keepalive expired — two hours by default — and a database behind a sleeping API would never go idle.
 
 A stack's time to sleep is therefore the **sum** of the timeouts along the chain, not the longest.
 
 ### Volumes
 
-Each named volume is one Archil disk, mounted by the agent before the application starts. A mount failure is fatal: starting a database with an empty data directory looks like success and fails much later.
+Each named volume is one Archil disk, mounted by the agent before the application starts.
+
+The disks are bottomless. There is no size to pick and none to resize later, they grow as data arrives, and the bill follows the bytes actually stored rather than a provisioned ceiling. They are also fast enough to put a database on directly, which is what the `postgres` example does. A sandbox's own root is on one too, so anything written outside a declared volume still survives a stop and a cold boot.
+
+A mount failure is fatal rather than a warning. Starting a database with an empty data directory looks like success and fails much later, in a way nobody can diagnose.
 
 Archil enforces a single writer, and `simplecloud volumes` shows who holds the delegation. Revocation has a window worth knowing about — a revoked client keeps accepting writes that report success and are never durable, until another client acquires the delegation — so a handover must stop the old owner first.
 
@@ -288,7 +293,7 @@ services:
 
 ### The hub
 
-You provide the host; `--bootstrap` prepares it. A stock Ubuntu image with nothing installed is enough, so cloud-init is an optimisation rather than a prerequisite.
+You provide the host and `--bootstrap` prepares it. A stock Ubuntu image with nothing installed is enough, so cloud-init is an optimisation rather than a prerequisite.
 
 ```console
 simplecloud hub add root@203.0.113.10 --identity ~/.ssh/id_ed25519 --bootstrap
@@ -300,7 +305,7 @@ simplecloud hub status
 | | |
 |---|---|
 | Size | One core, 512 MiB. Choose for **bandwidth**, not CPU — every byte between services passes through it |
-| Image | Any current Ubuntu; `--bootstrap` uses `apt` |
+| Image | Any current Ubuntu, since `--bootstrap` uses `apt` |
 | Network | Public IPv4, inbound UDP `51820–51899` |
 | Access | SSH as root, or a passwordless-sudo user |
 
@@ -308,7 +313,7 @@ Three things stay yours: providing the host, opening the UDP range if a firewall
 
 ### Configuration
 
-Environment alone is enough; no file is required.
+Environment alone is enough, with no file required.
 
 | Variable | Meaning |
 |---|---|
@@ -367,7 +372,7 @@ Each of these presents as something other than its cause. `doctor` checks the on
 | Symptom | Cause |
 |---|---|
 | Everything times out, no error | Egress denied by plan tier. A sandbox cannot reach the hub |
-| A sandbox comes up with egress still denied | `create_sandbox(network=…)` is accepted and silently ignored; only a later update works |
+| A sandbox comes up with egress still denied | `create_sandbox(network=…)` is accepted and silently ignored, so only a later update works |
 | A slot never becomes ready | Inbound UDP to the hub is blocked, so the tunnel never handshakes. `hub status` reports it per peer |
 | A service is unreachable while the overlay looks healthy | The application is not listening — check `logs` for its exit code |
 | A volume looks mounted and holds no data | The mount failed and writes went to the sandbox root. The agent treats this as fatal |
@@ -410,6 +415,6 @@ There is no Go SDK for Archil. `internal/archil` implements the REST surface and
 |---|---|
 | Egress policy | `PUT`, not `POST` |
 | Create disk | camelCase `diskId`, with the mount token nested in `authorizedUsers` — unlike list and get, which use `id` |
-| Resolve image | The field is `source`; the API's error for a missing one names `base_image` |
+| Resolve image | The field is `source`, though the API's error for a missing one names `base_image` |
 | Resolve image | Asynchronous, so it must be polled until `ready` before a sandbox can use it |
 | Create sandbox | A `network` field is accepted and silently ignored |
