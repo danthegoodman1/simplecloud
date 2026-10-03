@@ -1,0 +1,14 @@
+# Credentials and local environment
+.env
+.env.*
+
+# Build output
+/bin/
+/dist/
+
+# Local state the CLI writes
+.simplecloud/
+
+# Editor and OS noise
+.DS_Store
+*.swp
