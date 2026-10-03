@@ -71,13 +71,35 @@ func (d *Deployer) startAgent(cp *compose.Project, proj *state.Project, pl *plan
 	}
 
 	doneStep = d.step("%s starting agent", slot.Name)
-	// Registering it as an Archil service makes it supervised, so a cold boot brings
-	// it back without the CLI. The process API is the fallback for an image whose
-	// CLI lacks the subcommand.
-	script := fmt.Sprintf("archil services create simplecloud-agent --restart -- %s 2>/dev/null || true", agent.BinaryPath)
-	if _, err := d.Client.Exec(d.Ctx, slot.SandboxID, script); err != nil {
-		d.note("%s: could not register a supervised service: %v", slot.Name, err)
+	// Register the agent as a supervised Archil service. A service restarts on
+	// exit, which is the only thing that brings the agent back after a cold boot
+	// without the CLI being present — and a cold boot is what preemption, host
+	// failure, and a pause that does not complete all leave behind.
+	//
+	// The doorbell stays token-only, so no --tcp-port here.
+	supervised := false
+	create := fmt.Sprintf("archil services delete %s >/dev/null 2>&1; archil services create %s -- %s",
+		agentServiceName, agentServiceName, agent.BinaryPath)
+	if _, err := d.Client.ExecOK(d.Ctx, slot.SandboxID, create); err != nil {
+		d.note("%s: could not register the agent as a supervised service: %v", slot.Name, err)
+	} else if out, err := d.Client.ExecOK(d.Ctx, slot.SandboxID, "archil services list"); err == nil &&
+		strings.Contains(out, agentServiceName) {
+		supervised = true
 	}
+
+	if supervised {
+		slot.AgentProcessID = ""
+		if err := d.Store.PutSlot(slot); err != nil {
+			return err
+		}
+		doneStep("supervised, so it returns after a cold boot")
+		return nil
+	}
+
+	// Without supervision the agent still runs, but a cold boot leaves the slot
+	// unreachable until `up` or `reconcile` reinstalls it. Say so rather than
+	// leaving it to be discovered by a failing request.
+	d.note("%s: the agent is not supervised, so a cold boot will need simplecloud up", slot.Name)
 	p, err := d.Client.Run(d.Ctx, slot.SandboxID, agent.BinaryPath, archilRunOptions(svc))
 	if err != nil {
 		return fmt.Errorf("starting the agent: %w", err)
@@ -87,9 +109,12 @@ func (d *Deployer) startAgent(cp *compose.Project, proj *state.Project, pl *plan
 	if err := d.Store.PutSlot(slot); err != nil {
 		return err
 	}
-	doneStep("process %s", shortID(p.ID()))
+	doneStep("process %s, unsupervised", shortID(p.ID()))
 	return nil
 }
+
+// agentServiceName is the supervised service the agent runs as.
+const agentServiceName = "simplecloud-agent"
 
 // syncLocalPaths copies a declared local directory into its disk. The sync is
 // one-way and clobbering, which suits configuration and assets and must never

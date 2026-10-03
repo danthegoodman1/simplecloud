@@ -14,6 +14,7 @@ The same Compose file runs locally and deployed. Compute and storage come from [
   - [Service names and the relay](#service-names-and-the-relay)
   - [Waking](#waking)
   - [Sleeping](#sleeping)
+  - [Preemption and cold boot](#preemption-and-cold-boot)
   - [Volumes](#volumes)
   - [Isolation](#isolation)
 - [The Compose subset](#the-compose-subset)
@@ -53,6 +54,7 @@ Every figure is measured from inside a sandbox or on the platform. None includes
 | Throughput, eight streams | 1.75 Gbit/s |
 | Throughput, reverse direction | 1.35 Gbit/s |
 | Wake a sleeping service through the relay | 2.97–4.05s |
+| Recover from a cold boot, first request after a stop | 1.8s |
 | Create a sandbox | 0.9–3.2s |
 | Pause, near-idle service | 0.7–1.8s |
 | Pause, database with warm buffers | 20s and up |
@@ -197,6 +199,19 @@ flowchart TB
 The drain is the part that matters. Pausing snapshots memory and stops the VM without closing sockets. Without draining first, a peer would keep seeing `ESTABLISHED` until TCP keepalive expired — two hours by default — and a database behind a sleeping API would never go idle.
 
 A stack's time to sleep is therefore the **sum** of the timeouts along the chain, not the longest.
+
+### Preemption and cold boot
+
+Preemption, host failure, and a pause that does not complete all leave the same thing behind: a sandbox whose disk is intact and whose memory is gone. Its processes are not running, so a request that cold-boots it would otherwise find nothing listening and be reset.
+
+The agent is therefore registered as a **supervised Archil service**, which restarts on exit. Archil's own init starts it on boot, and it re-runs the whole setup — device links, the overlay, volume mounts, relays, then the application. Measured: a stopped sandbox served a request **1.8s** after it arrived, with `/proc/uptime` at 17s confirming a real reboot rather than a resume, and the service reporting `restart_count: 0` because it started cleanly.
+
+Registering that service does not interfere with sleeping. A paused sandbox stays paused.
+
+Two commands cover what supervision misses:
+
+- `up` **starts** a stopped sandbox rather than replacing it, in about a second, keeping everything on its disk. Only a configuration change replaces a sandbox, because environment is fixed at creation.
+- `reconcile` treats `stopped`, `exited`, and `failed` as drift and repairs them. A preempted sandbox answers an API query perfectly well, so existence alone would miss it, and nothing else notices until a request fails. `paused` is the intended state and is left alone.
 
 ### Volumes
 
@@ -388,6 +403,7 @@ Each of these presents as something other than its cause. `doctor` checks the on
 | A sandbox comes up with egress still denied | `create_sandbox(network=…)` is accepted and silently ignored, so only a later update works |
 | A slot never becomes ready | Inbound UDP to the hub is blocked, so the tunnel never handshakes. `hub status` reports it per peer |
 | A service is unreachable while the overlay looks healthy | The application is not listening — check `logs` for its exit code |
+| A slot was preempted and nothing noticed | `reconcile` reports `stopped`, `exited`, and `failed` as drift and repairs them. `up` starts such a sandbox without replacing it |
 | `ping <service>` succeeds but nothing connects | A service name resolves to a local relay alias and the relay carries TCP only, so ICMP never leaves the sandbox. Ping the overlay address from `simplecloud ps` to test the tunnel |
 | A volume looks mounted and holds no data | The mount failed and writes went to the sandbox root. The agent treats this as fatal |
 | Writes acknowledged then missing | Written after a delegation was revoked and before the new owner mounted |
@@ -397,7 +413,7 @@ Each of these presents as something other than its cause. `doctor` checks the on
 
 - **All traffic passes through the hub.** No sandbox has an inbound UDP endpoint, so there is no spoke-to-spoke path. The hub is a single point of failure and the bandwidth ceiling.
 - **Everything pauses within 24 hours.** The platform caps a sandbox's lifetime, so "running" is never durable. Wake-on-demand covers it.
-- **Sleeping is not a state guarantee.** A pause that does not complete falls back to `stopped`, losing memory. Design for a cold boot.
+- **Sleeping is not a state guarantee.** A pause that does not complete falls back to `stopped`, losing memory. The supervised agent recovers from that on the next request, but the application restarts rather than resuming, so design for a cold boot.
 - **Published ports are public and unauthenticated**, any TCP over TLS with SNI. No custom domains.
 - **State is per-machine.** Overlay ranges and listen ports come from the local database, so two machines deploying to one hub would collide. One operator per hub.
 - **Volume handover is unimplemented.** A replacement recreates without revoking, so moving a volume between slots is unproven.

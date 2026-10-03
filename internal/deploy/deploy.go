@@ -240,10 +240,32 @@ func (d *Deployer) ensureSandbox(proj *state.Project, sp *plan.ServicePlan, slp 
 			if err != nil {
 				return nil, false, err
 			}
-			if recorded != nil && recorded.ConfigHash == sp.Resolved.ConfigHash &&
-				(sb.Status == archil.StatusRunning || sb.Status == archil.StatusPaused) {
-				slot.SandboxStatus = string(sb.Status)
-				return slot, false, d.Store.PutSlot(slot)
+			unchanged := recorded != nil && recorded.ConfigHash == sp.Resolved.ConfigHash
+			if unchanged {
+				switch sb.Status {
+				case archil.StatusRunning, archil.StatusPaused:
+					slot.SandboxStatus = string(sb.Status)
+					return slot, false, d.Store.PutSlot(slot)
+
+				case archil.StatusStopped, archil.StatusExited, archil.StatusFailed:
+					// Preemption, host failure, or a pause that did not complete. The
+					// disk survives, so start the sandbox rather than replacing it:
+					// replacing would discard everything written outside a declared
+					// volume, which a cold boot from disk keeps.
+					doneStep := d.step("%s starting after %s", slot.Name, sb.Status)
+					started, err := d.Client.StartSandbox(d.Ctx, sb.ID)
+					if err != nil {
+						return nil, false, fmt.Errorf("starting after %s: %w", sb.Status, err)
+					}
+					slot.SandboxStatus = string(started.Status)
+					if err := d.Store.PutSlot(slot); err != nil {
+						return nil, false, err
+					}
+					doneStep("%s, disk preserved", started.Status)
+					// A cold boot runs no processes, so the agent has to be installed
+					// and started again even though its files are still on the disk.
+					return slot, true, nil
+				}
 			}
 			// Configuration changed. A sandbox's environment is fixed at creation, so
 			// the only way to apply it is a replacement.

@@ -157,19 +157,49 @@ func reconcileCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// A sandbox deleted outside the CLI leaves a slot pointing at nothing.
-			// Clearing the reference lets up recreate it, keeping the slot's identity.
+			d, closeAgent, agentErr := e.deployerQuiet()
+			if agentErr == nil {
+				defer closeAgent()
+			}
 			for _, s := range slots {
 				if s.SandboxID == "" {
+					fmt.Fprintf(out, "  %s: no sandbox yet\n", s.Name)
+					repairs++
 					continue
 				}
-				if _, err := e.client.GetSandbox(e.ctx, s.SandboxID); err != nil {
-					fmt.Fprintf(out, "  %s: its sandbox is gone; clearing the reference\n", s.Name)
+				sb, err := e.client.GetSandbox(e.ctx, s.SandboxID)
+				if err != nil {
+					// Deleted outside the CLI. Clearing the reference lets up recreate
+					// it while the slot keeps its key and address.
+					fmt.Fprintf(out, "  %s: its sandbox is gone, clearing the reference\n", s.Name)
 					s.SandboxID, s.SandboxStatus = "", ""
 					if err := e.store.PutSlot(s); err != nil {
 						return err
 					}
 					repairs++
+					continue
+				}
+				if string(sb.Status) != s.SandboxStatus {
+					s.SandboxStatus = string(sb.Status)
+					_ = e.store.PutSlot(s)
+				}
+				switch sb.Status {
+				case archil.StatusStopped, archil.StatusExited, archil.StatusFailed:
+					// A preempted or cold-booted sandbox answers GetSandbox perfectly
+					// well, so existence alone would miss it. Its processes are gone
+					// and nothing else notices until a request fails.
+					fmt.Fprintf(out, "  %s: %s, so its processes are gone and it needs starting\n", s.Name, sb.Status)
+					repairs++
+				case archil.StatusPaused:
+					// Asleep is the intended state, not drift.
+				case archil.StatusRunning:
+					if agentErr != nil {
+						continue
+					}
+					if _, err := d.AgentStatus(s); err != nil {
+						fmt.Fprintf(out, "  %s: running but its agent is not answering\n", s.Name)
+						repairs++
+					}
 				}
 			}
 
@@ -204,7 +234,7 @@ func reconcileCmd() *cobra.Command {
 				return nil
 			}
 			fmt.Fprintf(out, "\nRepairing %d item(s) by converging the project.\n", repairs)
-			d, closeHub, err := e.deployer(cmd)
+			rd, closeHub, err := e.deployer(cmd)
 			if err != nil {
 				return err
 			}
@@ -213,7 +243,7 @@ func reconcileCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return d.Up(cp, proj, pl, nil)
+			return rd.Up(cp, proj, pl, nil)
 		},
 	}
 }
