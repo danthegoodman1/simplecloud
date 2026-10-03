@@ -42,26 +42,24 @@ The same Compose file runs locally and deployed. Compute and storage come from [
 
 On one `s-1vcpu-512mb` hub and a two-service project — `nicolaka/netshoot` publishing HTTP, `postgres:17-alpine` private with a volume:
 
+Every figure below is measured inside the region, either from one sandbox to another or on the platform itself. Nothing here includes the trip from an operator's laptop, which would report the distance to `us-east-1` rather than anything about the system.
+
 | | |
 |---|--:|
-| Deploy from `up` to both slots ready | ~30s |
-| Create a sandbox | 0.9–3.2s |
-| Install the agent (7.2 MB) | 1.3s |
-| Public URL, awake | 200 in 0.30s |
-| **Reach `postgres:5432` by name** | **0.04s** |
+| **Reach `postgres:5432` by name, awake** | **0.04s** |
 | Overlay round trip through the hub | 13.5ms |
-| Doorbell wake of a paused sandbox | 0.77s |
-| Public URL wake | 0.80–1.14s |
 | **Wake a sleeping database through the relay** | **2.97–4.05s** |
-| Unauthenticated doorbell | 401 in 0.29s, stays paused |
+| Create a sandbox | 0.9–3.2s |
 | Pause, near-idle service | 0.7–1.8s |
 | Pause, database with warm buffers | 20s and up |
+| Deploy from `up` to both slots ready | ~30s |
 
 `go test -tags integration ./internal/e2e/` reruns all of it in 166s, including teardown.
 
-- **Reaching a service by name costs 0.04s** once awake. The Postgres SSL negotiation is part of the test, so a real server answered rather than a port merely being open.
-- **Waking through the relay is the slow path** at 3 to 4s: a resume, a WireGuard re-handshake on both sides, then the application's own accept.
+- **Reaching a service by name costs 0.04s** once awake, measured from inside the calling sandbox. The Postgres SSL negotiation is part of the test, so a real server answered rather than a port merely being open.
+- **Waking through the relay is the slow path** at 3 to 4s, timed inside the caller: a resume, a WireGuard re-handshake on both sides, then the application's own accept.
 - **Pausing costs what the service holds in memory.** A pause that does not finish falls back to `stopped` and loses memory state, so treat sleeping as an optimisation rather than a guarantee.
+- **Deploy time is dominated by control-plane round trips** from wherever you run the CLI, so it moves with your distance to the region rather than with the size of the project.
 
 ## Quick start
 
@@ -171,7 +169,7 @@ sequenceDiagram
   Relay-->>App: relay bytes
 ```
 
-An authenticated request wakes a paused sandbox in 0.77s. An unauthenticated one returns 401 in 0.29s and **leaves it paused**, so learning a hostname buys nothing — not even the cost of a wake. Both the dial and the doorbell retry for three minutes, because the caller may itself have just woken and its first outbound request can fail.
+An authenticated request resumes a paused sandbox and returns once its agent answers. An unauthenticated one returns 401 and **leaves it paused**, so learning a hostname buys nothing, not even the cost of a wake. Both the dial and the doorbell retry for three minutes, because the caller may itself have just woken and its first outbound request can fail.
 
 The same listener serves the control API the CLI uses for status, activity, logs, and drain, gated on a second token. A wake cannot read logs.
 
